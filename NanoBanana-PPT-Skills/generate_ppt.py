@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """
-PPT Generator - Generate PPT slide images using Google Gemini API.
+PPT Generator - Generate PPT slide images using Gemini or Jimeng API.
 
 This script generates PPT slide images based on a slide plan and style template,
-then creates an HTML viewer for playback.
+then creates an HTML viewer for playback. Supports multiple backends:
+  - gemini: Google Gemini API (default)
+  - jimeng: Volcengine Jimeng Seedream API
 """
 
 import argparse
@@ -22,6 +24,7 @@ from dotenv import load_dotenv
 # =============================================================================
 
 DEFAULT_RESOLUTION = "2K"
+DEFAULT_BACKEND = "gemini"
 DEFAULT_TEMPLATE_PATH = "templates/viewer.html"
 OUTPUT_BASE_DIR = "outputs"
 
@@ -243,6 +246,38 @@ def generate_slide(
         return None
 
 
+def generate_slide_jimeng(
+    prompt: str,
+    slide_number: int,
+    output_dir: str,
+    resolution: str = DEFAULT_RESOLUTION,
+) -> Optional[str]:
+    """
+    Generate a single PPT slide image using Jimeng Seedream API.
+
+    Args:
+        prompt: The generation prompt.
+        slide_number: Slide number for filename.
+        output_dir: Output directory path.
+        resolution: Image resolution (2K or 4K).
+
+    Returns:
+        Path to saved image, or None if generation failed.
+    """
+    import jimeng_image_api
+
+    print(f"Generating slide {slide_number} (Jimeng)...")
+
+    image_path = os.path.join(
+        output_dir, "images", f"slide-{slide_number:02d}.png"
+    )
+
+    result = jimeng_image_api.generate_image(prompt, image_path, resolution)
+    if result:
+        print(f"  Slide {slide_number} saved: {image_path}")
+    return result
+
+
 # =============================================================================
 # Output Generation
 # =============================================================================
@@ -308,14 +343,17 @@ def save_prompts(output_dir: str, prompts_data: Dict[str, Any]) -> str:
 def create_argument_parser() -> argparse.ArgumentParser:
     """Create and configure argument parser."""
     parser = argparse.ArgumentParser(
-        description="PPT Generator - Generate PPT images using Gemini API",
+        description="PPT Generator - Generate PPT images using Gemini or Jimeng API",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Example usage:
   python generate_ppt.py --plan slides_plan.json --style styles/gradient-glass.md --resolution 2K
+  python generate_ppt.py --plan slides_plan.json --style styles/gradient-glass.md --backend jimeng
+  python generate_ppt.py --plan slides_plan.json --style styles/gradient-glass.md --backend jimeng --video
 
 Environment variables:
-  GEMINI_API_KEY: Google AI API key (required)
+  GEMINI_API_KEY: Google AI API key (for gemini backend)
+  ARK_API_KEY:    Volcengine Ark API key (for jimeng backend)
 """,
     )
 
@@ -343,6 +381,17 @@ Environment variables:
         "--template",
         default=DEFAULT_TEMPLATE_PATH,
         help=f"HTML template path (default: {DEFAULT_TEMPLATE_PATH})",
+    )
+    parser.add_argument(
+        "--backend",
+        choices=["gemini", "jimeng"],
+        default=DEFAULT_BACKEND,
+        help=f"Image generation backend (default: {DEFAULT_BACKEND})",
+    )
+    parser.add_argument(
+        "--video",
+        action="store_true",
+        help="Also generate transition videos between slides (jimeng backend only)",
     )
 
     return parser
@@ -377,12 +426,17 @@ def main() -> None:
     slides = slides_plan["slides"]
     total_slides = len(slides)
 
+    backend = args.backend
+    generate_video = args.video
+
     print("=" * 60)
     print("PPT Generator Started")
     print("=" * 60)
+    print(f"Backend: {backend}")
     print(f"Style: {args.style}")
     print(f"Resolution: {args.resolution}")
     print(f"Slides: {total_slides}")
+    print(f"Video: {'yes' if generate_video else 'no'}")
     print(f"Output: {output_dir}")
     print("=" * 60)
     print()
@@ -414,8 +468,11 @@ def main() -> None:
             total_slides,
         )
 
-        # Generate image
-        image_path = generate_slide(prompt, slide_number, output_dir, args.resolution)
+        # Generate image using selected backend
+        if backend == "jimeng":
+            image_path = generate_slide_jimeng(prompt, slide_number, output_dir, args.resolution)
+        else:
+            image_path = generate_slide(prompt, slide_number, output_dir, args.resolution)
 
         # Record prompt data
         prompts_data["slides"].append({
@@ -427,6 +484,35 @@ def main() -> None:
         })
 
         print()
+
+    # Generate transition videos if requested
+    if generate_video and backend == "jimeng":
+        import jimeng_image_api
+
+        print("=" * 60)
+        print("Generating transition videos...")
+        print("=" * 60)
+
+        os.makedirs(os.path.join(output_dir, "videos"), exist_ok=True)
+        generated_images = [
+            s["image_path"] for s in prompts_data["slides"] if s["image_path"]
+        ]
+
+        for i, img_path in enumerate(generated_images):
+            slide_data = prompts_data["slides"][i]
+            video_path = os.path.join(
+                output_dir, "videos", f"transition-{slide_data['slide_number']:02d}.mp4"
+            )
+            prompt_text = f"Smooth cinematic transition animation for presentation slide: {slide_data['content'][:100]}"
+            print(f"Generating video for slide {slide_data['slide_number']}...")
+            result = jimeng_image_api.generate_video_from_image(
+                img_path, prompt_text, video_path, duration=5
+            )
+            if result:
+                print(f"  Video saved: {video_path}")
+            else:
+                print(f"  Video generation skipped/failed for slide {slide_data['slide_number']}")
+            print()
 
     # Save prompts
     save_prompts(output_dir, prompts_data)
